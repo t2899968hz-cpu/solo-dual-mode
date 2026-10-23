@@ -1,0 +1,95 @@
+# Solo dual-mode bridge builds on GitLab (moved from GitHub Actions when the GitHub
+# account was suspended, 2026-10-23).
+#
+# BUILD ONLY. Every job is manual (run a pipeline from the web UI) and nothing is
+# published: the owner has not authorised a solo-dual-mode release on GitLab. Each
+# job leaves its platform package as a pipeline artifact.
+#
+# Runners: Linux on GitLab's shared runners (arm64 via the hosted arm64 runner),
+# Windows on the hosted Windows runner; GitLab's hosted macOS runners need a paid tier.
+
+variables:
+  CARGO_TERM_COLOR: always
+
+stages: [build]
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+.verify_and_package: &verify_and_package
+  - BIN="bridge-src/target/$TARGET/release/$BINARY"
+  - test -f "$BIN" && "$BIN" --version
+  - grep -a -q 'ZKAS_KASPA_NODE' "$BIN"
+  - grep -a -q 'Real merged mining ENABLED' "$BIN"
+  - grep -a -q 'KAS BLOCK ACCEPTED' "$BIN"
+  - grep -a -q 'totalKasBlocks' "$BIN"
+  - mkdir -p dist && cp "$BIN" dist/ && cp bridge.yaml.template README.md install.sh install.ps1 run.ps1 dist/
+  - (cd dist && zip -r "../solo-dual-mode-$ARTIFACT.zip" .)
+  - sha256sum "solo-dual-mode-$ARTIFACT.zip"
+
+.unix:
+  stage: build
+  when: manual
+  variables: { BINARY: stratum-bridge }
+  before_script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq && apt-get install -y -qq curl git build-essential pkg-config libssl-dev protobuf-compiler zip > /dev/null
+    - curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --target "$TARGET"
+    - source "$HOME/.cargo/env"
+  script:
+    - cargo build --locked --release --manifest-path bridge-src/Cargo.toml --bin stratum-bridge --target "$TARGET"
+    - *verify_and_package
+  artifacts: { paths: ["solo-dual-mode-*.zip"], expire_in: 30 days }
+
+build:linux-x64:
+  extends: .unix
+  image: ubuntu:22.04
+  variables: { TARGET: x86_64-unknown-linux-gnu, ARTIFACT: linux-x64 }
+
+build:linux-arm64:
+  extends: .unix
+  image: ubuntu:22.04
+  tags: [saas-linux-medium-arm64]
+  variables: { TARGET: aarch64-unknown-linux-gnu, ARTIFACT: linux-arm64 }
+
+.macos:
+  extends: .unix
+  tags: [saas-macos-medium-m1]
+  image: macos-14-xcode-15
+  allow_failure: true
+  before_script:
+    - brew install protobuf
+    - curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --target "$TARGET"
+    - source "$HOME/.cargo/env"
+
+build:macos-x64:
+  extends: .macos
+  variables: { TARGET: x86_64-apple-darwin, ARTIFACT: macos-x64 }
+
+build:macos-arm64:
+  extends: .macos
+  variables: { TARGET: aarch64-apple-darwin, ARTIFACT: macos-arm64 }
+
+build:windows-x64:
+  stage: build
+  when: manual
+  tags: [saas-windows-medium-amd64]
+  allow_failure: true
+  variables: { TARGET: x86_64-pc-windows-msvc }
+  before_script:
+    - $ProgressPreference = 'SilentlyContinue'
+    - Invoke-WebRequest "https://github.com/protocolbuffers/protobuf/releases/download/v27.3/protoc-27.3-win64.zip" -OutFile protoc.zip
+    - Expand-Archive protoc.zip -DestinationPath C:\protoc
+    - $env:PATH = "C:\protoc\bin;$env:PATH"
+    - Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+    - .\rustup-init.exe -y --profile minimal --target $env:TARGET
+    - $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+  script:
+    - cargo build --locked --release --manifest-path bridge-src/Cargo.toml --bin stratum-bridge --target $env:TARGET
+    - $bin = "bridge-src\target\$env:TARGET\release\stratum-bridge.exe"
+    - "& $bin --version"
+    - New-Item -ItemType Directory -Force dist | Out-Null
+    - Copy-Item $bin, bridge.yaml.template, README.md, install.sh, install.ps1, run.ps1 dist\
+    - Compress-Archive -Path dist\* -DestinationPath solo-dual-mode-windows-x64.zip
+  artifacts: { paths: ["solo-dual-mode-*.zip"], expire_in: 30 days }

@@ -60,9 +60,9 @@ guessing a value.
 | Windows x64 | `solo-dual-mode-windows-x64.zip` |
 | Windows ARM64 | `solo-dual-mode-windows-arm64.zip` |
 
-Every release includes `SHA256SUMS`. The six packages are produced on native
-GitHub-hosted runners; a release is not published if any platform build or
-merged-mining capability check fails.
+Every release includes `SHA256SUMS`. The packages are produced on native CI runners
+(`.gitlab-ci.yml`), each job verifying the executable and its merged-mining
+capability before it packages anything.
 
 ## Quick start from this checkout
 
@@ -151,7 +151,7 @@ The expected manifest shape is shown in
 [`release-manifest.example.json`](release-manifest.example.json). A production
 release should publish separate manifests for ZKas node, Kaspa node, and bridge
 with immutable versioned URLs, signed manifests, and signed checksums. “Latest” should mean a
-maintainer-updated manifest pointer, not an unpinned GitHub API asset lookup.
+maintainer-updated manifest pointer, not an unpinned release-API asset lookup.
 
 No production manifests are published yet. Until they exist, build locally:
 
