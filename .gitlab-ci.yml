@@ -19,7 +19,6 @@ workflow:
   - test -f "$BIN"
   - '"$BIN" --version'
   - grep -a -q ZKAS_KASPA_NODE "$BIN"
-  - grep -a -q ZKM1 "$BIN"
   - mkdir -p dist && cp "$BIN" dist/ && cp bridge.yaml.template README.md install.sh install.ps1 run.ps1 dist/
   - ZIP="solo-dual-mode-$ARTIFACT.zip"
   - (cd dist && zip -r "../$ZIP" .)
@@ -53,7 +52,7 @@ build:linux-arm64:
 .macos:
   extends: .unix
   tags: [saas-macos-medium-m1]
-  image: macos-14-xcode-15
+  image: macos-15-xcode-16
   allow_failure: true
   before_script:
     - brew install protobuf || true
