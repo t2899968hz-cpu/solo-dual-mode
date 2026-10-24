@@ -44,6 +44,14 @@ const INACTIVE_VARDIFF_TTL: Duration = Duration::from_secs(60 * 60);
 const STATS_PRINT_INTERVAL: Duration = Duration::from_secs(10);
 const BLOCK_CONFIRM_RETRY_DELAY: Duration = Duration::from_secs(2);
 const BLOCK_CONFIRM_MAX_ATTEMPTS: usize = 30;
+/// Rolling window for the per-worker hashrate estimate. Shares older than this
+/// age out, so the rate reflects recent work — not a since-connect cumulative
+/// average that spikes on each share, decays ~1/elapsed between shares, and never
+/// recovers from an idle gap.
+pub const HASHRATE_WINDOW_SECS: f64 = 300.0;
+/// Floor for the averaging span, so the first share arriving a fraction of a
+/// second after connect does not read as a huge transient hashrate.
+pub const HASHRATE_MIN_WINDOW_SECS: f64 = 15.0;
 /// Narrow compatibility window for ASIC firmware that reports a nearby job
 /// number. Never walk the full 300-slot history: each attempt performs a full
 /// kHeavyHash calculation.
@@ -172,6 +180,9 @@ pub struct WorkStats {
     pub min_diff: Arc<Mutex<f64>>,
     pub active_connections: Arc<Mutex<u32>>,
     pub last_session_activity: Arc<Mutex<Instant>>,
+    /// Rolling (Instant, hash_value in GH) samples for the windowed hashrate
+    /// estimate; older-than-window entries age out on push/read.
+    pub hash_samples: Arc<Mutex<std::collections::VecDeque<(Instant, f64)>>>,
 }
 
 impl WorkStats {
@@ -191,7 +202,47 @@ impl WorkStats {
             min_diff: Arc::new(Mutex::new(0.0)),
             active_connections: Arc::new(Mutex::new(0)),
             last_session_activity: Arc::new(Mutex::new(Instant::now())),
+            hash_samples: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
+    }
+
+    /// Record one accepted share's work (GH) into the rolling window, aging out
+    /// samples older than `HASHRATE_WINDOW_SECS`.
+    pub fn record_hash_sample(&self, hash_value: f64) {
+        let now = Instant::now();
+        let mut q = self.hash_samples.lock();
+        q.push_back((now, hash_value));
+        while let Some(&(t, _)) = q.front() {
+            if now.duration_since(t).as_secs_f64() > HASHRATE_WINDOW_SECS {
+                q.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Windowed hashrate in GH/s: Σ(hash_value within the last
+    /// `HASHRATE_WINDOW_SECS`) / span, where span is the connection age capped at
+    /// the window and floored at `HASHRATE_MIN_WINDOW_SECS`. This replaces the
+    /// since-connect cumulative average (which spiked on each share, decayed
+    /// ~1/elapsed between shares, and stayed diluted after any idle gap).
+    pub fn windowed_hashrate(&self) -> f64 {
+        let now = Instant::now();
+        let mut q = self.hash_samples.lock();
+        while let Some(&(t, _)) = q.front() {
+            if now.duration_since(t).as_secs_f64() > HASHRATE_WINDOW_SECS {
+                q.pop_front();
+            } else {
+                break;
+            }
+        }
+        let sum: f64 = q.iter().map(|(_, h)| h).sum();
+        if sum <= 0.0 {
+            return 0.0;
+        }
+        let age = now.duration_since(self.start_time).as_secs_f64();
+        let span = age.min(HASHRATE_WINDOW_SECS).max(HASHRATE_MIN_WINDOW_SECS);
+        sum / span
     }
 }
 
@@ -1058,10 +1109,13 @@ impl ShareHandler {
                 // ZKas chain; using it left the pool at "0 blocks confirmed"
                 // for a full day of live mining).
                 use kaspa_consensus_core::hashing::header;
+                // The SOLVED parent: from the security fork the ZKas nonce is derived from the parent
+                // header's hash, so the unsolved template would name a block that never exists.
                 let block_hash = kaspa_api
-                    .merged_chain_hash(&current_job.block)
+                    .merged_chain_hash(&block)
                     .map_or_else(|| header::hash(&block.header).to_string(), |h| h.to_string());
-                let block_daa_score = block.header.daa_score;
+                // ZKas DAA in merged mode (the parent's is the Kaspa chain's), as the accountant expects.
+                let block_daa_score = kaspa_api.merged_zkas_daa(&block).unwrap_or(block.header.daa_score);
 
                 // Emit BlockFound *before* submitting to kaspad so consumers
                 // record the candidate even if our submit_block call hangs
@@ -1462,12 +1516,18 @@ impl ShareHandler {
 
         // Accumulate hashValue for hashrate calculation
         *stats.shares_diff.lock() += hash_value;
+        // Feed the rolling-window estimator (the displayed per-worker hashrate).
+        stats.record_hash_sample(hash_value);
         *stats.last_share.lock() = Instant::now();
         *self.overall.shares_found.lock() += 1;
 
         let wallet_addr = ctx.wallet_addr.lock().clone();
         let worker_name = ctx.worker_name.lock().clone();
-        record_share_found(&self.worker_prom_context(&ctx, ""), hash_value);
+        let wctx = self.worker_prom_context(&ctx, "");
+        record_share_found(&wctx, hash_value);
+        // Publish the rolling-window hashrate for the dashboard (same value the
+        // console shows), so it no longer reports the since-connect average.
+        crate::prom::set_worker_hashrate(&wctx, stats.windowed_hashrate());
         crate::prom::observe_share_accept_latency(&self.instance_id, submit_started.elapsed().as_secs_f64());
 
         // Emit ShareCredited. We use the worker's *assigned* pool
@@ -1475,7 +1535,7 @@ impl ShareHandler {
         // job), not the share's hash_value — accounting downstream
         // multiplies by difficulty to get PROP weight.
         let assigned_diff = credited_job_diff.as_ref().map_or(hash_value, |d| d.diff_value);
-        let job_daa_score = current_job.block.header.daa_score;
+        let job_daa_score = kaspa_api.merged_zkas_daa(&current_job.block).unwrap_or(current_job.block.header.daa_score);
         if let (Ok(wallet_d), Ok(worker_d), Ok(difficulty_d)) =
             (WalletAddress::new(wallet_addr.clone()), WorkerName::new(worker_name.clone()), ShareDifficulty::new(assigned_diff))
         {
@@ -1731,12 +1791,11 @@ impl ShareHandler {
                     let stats_map = stats.lock();
                     for (_, v) in stats_map.iter() {
                         let elapsed = v.start_time.elapsed().as_secs_f64();
-                        let rate = if elapsed > 0.0 {
-                            let total_hash_value = *v.shares_diff.lock();
-                            total_hash_value / elapsed
-                        } else {
-                            0.0
-                        };
+                        // Rolling-window rate (last HASHRATE_WINDOW_SECS), not the
+                        // since-connect cumulative average that spiked on each share
+                        // and decayed between shares. `elapsed` is still used below
+                        // for the shares-per-minute trend.
+                        let rate = v.windowed_hashrate();
                         total_rate += rate;
 
                         let shares = *v.shares_found.lock();
@@ -2089,6 +2148,12 @@ pub trait KaspaApiTrait: Send + Sync {
     /// displaying it always fails (the live "0 blocks / never confirmed blue"
     /// bug). `None` ⇒ not merged: the job's own header hash IS the chain hash.
     fn merged_chain_hash(&self, _parent_block: &Block) -> Option<kaspa_hashes::Hash> {
+        None
+    }
+
+    /// The ZKas DAA score of the block a merged parent commits to. `None` ⇒ not merged (the job's
+    /// own header is the ZKas block and carries its score).
+    fn merged_zkas_daa(&self, _parent_block: &Block) -> Option<u64> {
         None
     }
 

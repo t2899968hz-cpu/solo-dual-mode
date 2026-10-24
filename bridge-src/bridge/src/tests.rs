@@ -1327,9 +1327,19 @@ mod comprehensive_tests {
         // Spawn a task to accept the connection
         let accept_handle = tokio::spawn(async move { listener.accept().await });
 
-        // Connect to the listener
-        let _stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // Connect to the listener and keep the CLIENT end open and draining for the
+        // life of the connection, so the handler's writes (subscribe reply,
+        // set_extranonce, authorize reply, ...) succeed. Previously this dropped the
+        // client socket, so the second write on any multi-write path (e.g. the
+        // IceRiver subscribe) spuriously failed with a broken pipe.
+        let client_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (accepted_stream, _) = accept_handle.await.unwrap().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut s = client_stream;
+            let mut buf = [0u8; 4096];
+            while s.read(&mut buf).await.map(|n| n > 0).unwrap_or(false) {}
+        });
 
         let state = Arc::new(MiningState::new());
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1412,9 +1422,11 @@ mod comprehensive_tests {
         let result = handle_subscribe(ctx.clone(), event, Some(client_handler.clone())).await;
         assert!(result.is_ok(), "Subscribe should succeed");
 
-        // Verify Bitmain doesn't get extranonce
+        // Bitmain/GodMiner now receives a 2-byte extranonce by default: with size 0
+        // every miner in a GodMiner farm grinds the same nonce space (observed
+        // ~300 duplicate blocks/hour). Size 0 only under ZKAS_BITMAIN_EXTRANONCE=0.
         let extranonce = ctx.extranonce.lock().clone();
-        assert!(extranonce.is_empty(), "Bitmain should not get extranonce");
+        assert_eq!(extranonce.len(), 4, "Bitmain should get a 2-byte extranonce (4 hex chars)");
     }
 
     // ========================================================================
@@ -1452,8 +1464,9 @@ mod comprehensive_tests {
         *ctx.remote_app.lock() = "GodMiner".to_string();
         client_handler.assign_extranonce_for_miner(&ctx, "GodMiner");
 
+        // Bitmain now gets a 2-byte extranonce by default (anti-duplicate-work).
         let extranonce = ctx.extranonce.lock().clone();
-        assert!(extranonce.is_empty(), "Bitmain should not get extranonce");
+        assert_eq!(extranonce.len(), 4, "Bitmain should get a 2-byte extranonce (4 hex chars)");
     }
 
     #[test]
@@ -1799,9 +1812,12 @@ mod comprehensive_tests {
         let wallet = "kaspa:qr8example123456789012345678901234567890123456789012345678901234567890".to_string();
         *ctx.wallet_addr.lock() = wallet.clone();
 
-        // Reusing the same in-memory stats entry must still sync prom start time for the wallet.
-        let stats_after_wallet = handler.get_create_stats(&ctx);
-        assert!(Arc::ptr_eq(&stats_before_wallet.worker_name, &stats_after_wallet.worker_name));
+        // Stats are keyed by wallet+worker, so setting the wallet yields a fresh
+        // entry for the authorized identity (the pre-wallet entry ages out via TTL;
+        // the real authorize path migrates identity via prepare_worker_identity_change).
+        // The property that matters here is that the prom start-time gauge is synced
+        // for the now-known wallet, checked below.
+        let _stats_after_wallet = handler.get_create_stats(&ctx);
 
         record_share_found(&WorkerContext::from_stratum("Instance 1", &ctx, ""), 8192.0);
 
@@ -1823,6 +1839,26 @@ mod comprehensive_tests {
         }
 
         assert!(found_start_time, "ks_worker_start_time must exist for the authorized wallet label set");
+    }
+
+    #[test]
+    fn test_windowed_hashrate_uses_recent_window_not_since_connect() {
+        // Regression guard for the hashrate estimator: the windowed rate must be
+        // Σ(recent hash_value) / span, NOT the since-connect cumulative average
+        // (which spiked on each share and decayed ~1/elapsed between shares).
+        let stats = kaspa_stratum_bridge::share_handler::WorkStats::new("w".to_string());
+        assert_eq!(stats.windowed_hashrate(), 0.0, "no samples -> 0");
+
+        let n = 20usize;
+        let v = 8192.0_f64;
+        for _ in 0..n {
+            stats.record_hash_sample(v);
+        }
+        // The samples land ~instantly, so the averaging span floors to
+        // HASHRATE_MIN_WINDOW_SECS; the rate is the recent sum over that floor.
+        let expected = (n as f64 * v) / kaspa_stratum_bridge::share_handler::HASHRATE_MIN_WINDOW_SECS;
+        let got = stats.windowed_hashrate();
+        assert!((got - expected).abs() < 1.0, "windowed rate {got} should be ~= {expected}");
     }
 
     #[test]
@@ -2602,16 +2638,20 @@ mod comprehensive_tests {
         // Test: Invalid addresses should be rejected
         let ctx = create_test_context().await;
 
-        // Test empty address
+        // ZKas policy: a miner is NEVER dropped for a bad address. An empty or
+        // malformed address is accepted and the coinbase is routed to the pool
+        // fallback address, so the miner keeps mining (forfeiting rewards to the
+        // pool until it sets a valid address) rather than being disconnected.
         let event1 = JsonRpcEvent::new(Some("1".to_string()), "mining.authorize", vec![json!("")]);
         let result1: Result<(), _> = handle_authorize(ctx.clone(), event1, None, None).await;
-        assert!(result1.is_err(), "Empty address should be rejected");
+        assert!(result1.is_ok(), "empty address is accepted (coinbase -> pool fallback), never rejected");
+        assert!(!ctx.wallet_addr.lock().is_empty(), "empty address is remapped to the pool fallback");
 
-        // Test malformed address
         let ctx2 = create_test_context().await;
         let event2 = JsonRpcEvent::new(Some("2".to_string()), "mining.authorize", vec![json!("invalid_address")]);
         let result2: Result<(), _> = handle_authorize(ctx2.clone(), event2, None, None).await;
-        assert!(result2.is_err(), "Invalid address format should be rejected");
+        assert!(result2.is_ok(), "malformed address is accepted (coinbase -> pool fallback), never rejected");
+        assert_ne!(*ctx2.wallet_addr.lock(), "invalid_address", "malformed address is remapped to the pool fallback");
     }
 
     #[tokio::test]
@@ -2820,10 +2860,10 @@ mod comprehensive_tests {
         let ice_extranonce = ctx_iceriver.extranonce.lock().clone();
         assert!(!ice_extranonce.is_empty(), "IceRiver should get extranonce (big job format)");
 
-        // Test Bitmain detection (no extranonce)
+        // Bitmain now gets a 2-byte extranonce by default (anti-duplicate-work).
         handler.assign_extranonce_for_miner(&ctx_bitmain, "GodMiner");
         let bitmain_extranonce = ctx_bitmain.extranonce.lock().clone();
-        assert!(bitmain_extranonce.is_empty(), "Bitmain should not get extranonce");
+        assert_eq!(bitmain_extranonce.len(), 4, "Bitmain should get a 2-byte extranonce (4 hex chars)");
     }
 
     // ========================================================================

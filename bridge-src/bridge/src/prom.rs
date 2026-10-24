@@ -98,6 +98,11 @@ static NETWORK_BLOCK_COUNT: OnceLock<Gauge> = OnceLock::new();
 /// Worker start time gauge (Unix timestamp in seconds)
 static WORKER_START_TIME: OnceLock<GaugeVec> = OnceLock::new();
 
+/// Worker rolling-window hashrate gauge (GH/s). Published by the bridge from its
+/// windowed estimator so the dashboard shows a recent-window rate rather than a
+/// since-connect cumulative average diluted by idle gaps.
+static WORKER_HASHRATE: OnceLock<GaugeVec> = OnceLock::new();
+
 /// Anti-abuse: incoming TCP-accepts rejected by the per-IP guard.
 static ANTI_ABUSE_REJECT_COUNTER: OnceLock<CounterVec> = OnceLock::new();
 
@@ -248,6 +253,10 @@ pub fn init_metrics() {
 
     WORKER_START_TIME.get_or_init(|| {
         register_gauge_vec!("ks_worker_start_time", "Unix timestamp (seconds) when worker first connected", WORKER_LABELS).unwrap()
+    });
+
+    WORKER_HASHRATE.get_or_init(|| {
+        register_gauge_vec!("ks_worker_hashrate", "Rolling-window hashrate (GH/s) for a worker", WORKER_LABELS).unwrap()
     });
 
     ANTI_ABUSE_REJECT_COUNTER.get_or_init(|| {
@@ -801,6 +810,17 @@ pub fn record_share_found(worker: &WorkerContext, share_diff: f64) {
     update_worker_activity(worker);
 }
 
+/// Publish the worker's rolling-window hashrate (GH/s) for the dashboard, so it
+/// shows a recent-window rate instead of the since-connect counter/elapsed ratio.
+pub fn set_worker_hashrate(worker: &WorkerContext, hashrate_ghs: f64) {
+    if worker.wallet.is_empty() {
+        return;
+    }
+    if let Some(gauge) = WORKER_HASHRATE.get() {
+        gauge.with_label_values(&worker.labels()).set(hashrate_ghs);
+    }
+}
+
 /// Record a stale share
 pub fn record_stale_share(worker: &WorkerContext) {
     if let Some(counter) = INVALID_COUNTER.get() {
@@ -1216,6 +1236,7 @@ async fn get_stats_json_filtered(instance_id: Option<&str>) -> StatsResponse {
     let mut worker_stats: HashMap<String, WorkerInfo> = HashMap::new();
     let mut worker_hash_values: HashMap<String, f64> = HashMap::new(); // Store hash values for hashrate calculation
     let mut worker_start_times: HashMap<String, f64> = HashMap::new(); // Store start times for hashrate calculation
+    let mut worker_hashrates: HashMap<String, f64> = HashMap::new(); // Windowed hashrate (GH/s) published by the bridge
     let mut worker_difficulties: HashMap<String, f64> = HashMap::new(); // Store current difficulty for each worker
     let mut block_set: HashSet<String> = HashSet::new();
     let mut kas_block_set: HashSet<String> = HashSet::new();
@@ -1526,6 +1547,24 @@ async fn get_stats_json_filtered(instance_id: Option<&str>) -> StatsResponse {
             }
         }
 
+        // Parse worker rolling-window hashrate (preferred over counter/elapsed)
+        if name == "ks_worker_hashrate" {
+            for metric in family.get_metric() {
+                let (instance, worker_key, wallet) = parse_worker_labels(metric.get_label());
+                if !worker_key.is_empty() {
+                    let key = format!("{}:{}:{}", instance, worker_key, wallet);
+                    let ghs = metric.get_gauge().value();
+                    // Multiple label variants: keep the largest (the active lane).
+                    worker_hashrates.entry(key.clone()).and_modify(|v| {
+                        if ghs > *v {
+                            *v = ghs;
+                        }
+                    }).or_insert(ghs);
+                    worker_stats.entry(key.clone()).or_insert_with(|| new_worker_info(instance, worker_key, wallet));
+                }
+            }
+        }
+
         // Parse worker current difficulty
         if name == "ks_worker_current_difficulty" {
             for metric in family.get_metric() {
@@ -1552,11 +1591,17 @@ async fn get_stats_json_filtered(instance_id: Option<&str>) -> StatsResponse {
 
     // Calculate hashrate for each worker
     for (key, worker) in worker_stats.iter_mut() {
-        if let (Some(&total_hash_value), Some(&start_time_secs)) = (worker_hash_values.get(key), worker_start_times.get(key)) {
+        if let Some(&ghs) = worker_hashrates.get(key) {
+            // Preferred: the bridge's rolling-window estimate (recent work, not a
+            // since-connect average diluted by idle gaps).
+            worker.hashrate = ghs;
+            total_worker_hashrate_ghs += ghs;
+        } else if let (Some(&total_hash_value), Some(&start_time_secs)) =
+            (worker_hash_values.get(key), worker_start_times.get(key))
+        {
+            // Fallback for an older bridge that does not publish ks_worker_hashrate:
+            // the since-connect average (total_hash_value / elapsed, GH/s).
             let elapsed = current_time - start_time_secs;
-            // Calculate hashrate: total_hash_value / elapsed_time (in GH/s)
-            // Matches console stats: hashrate = shares_diff / elapsed
-            // Formula: hashrate = total_hash_value / elapsed (already in GH/s units)
             if elapsed > 0.0 && total_hash_value > 0.0 {
                 worker.hashrate = total_hash_value / elapsed;
                 total_worker_hashrate_ghs += worker.hashrate;
