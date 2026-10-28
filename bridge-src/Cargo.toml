@@ -9,24 +9,24 @@ edition = "2024"
 rust-version = "1.91.0"
 license = "MIT OR Apache-2.0"
 authors = ["ZKas contributors"]
-repository = "https://gitlab.com/zkas-group/solo-dual-mode"
+repository = "https://zkas.info/code/bridge"
 publish = false
 
 [workspace.dependencies]
-kaspa-alloc          = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-consensus-core = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-hashes         = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-math           = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-merkle         = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-pow            = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-addresses      = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-rpc-core       = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-rpc-service    = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-grpc-client    = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-notify         = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-core           = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspa-utils          = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
-kaspad               = { git = "https://gitlab.com/zkas-group/zkas-rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-alloc          = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-consensus-core = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-hashes         = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-math           = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-merkle         = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-pow            = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-addresses      = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-rpc-core       = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-rpc-service    = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-grpc-client    = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-notify         = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-core           = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspa-utils          = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
+kaspad               = { git = "https://zkas.info/code/rusty", rev = "01ac1865181613073d3b4dda00534f2aeb9471be" }
 dirs = "5"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

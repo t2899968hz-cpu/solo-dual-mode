@@ -157,7 +157,7 @@ No production manifests are published yet. Until they exist, build locally:
 
 ```bash
 # ZKas node (the FireCash fork)
-git clone https://gitlab.com/zkas-group/zkas-rusty.git
+git clone https://zkas.info/code/rusty.git
 cd zkas-rusty && cargo build --release -p kaspad
 
 # Kaspa parent node for merged mining (official Kaspa repository)
@@ -165,7 +165,7 @@ git clone https://github.com/kaspanet/rusty-kaspa.git
 cd rusty-kaspa && git checkout v2.0.1 && cargo build --release -p kaspad
 
 # Bridge
-git clone https://gitlab.com/zkas-group/solo-dual-mode.git
+git clone https://zkas.info/code/bridge.git
 cd solo-dual-mode
 cargo build --locked --release --manifest-path bridge-src/Cargo.toml --bin stratum-bridge
 ```
